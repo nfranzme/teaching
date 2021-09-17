@@ -1,0 +1,736 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r message=FALSE, warning=FALSE}
+library(readxl)
+library(corrplot)
+library(lm.beta)
+library(Hmisc)
+library(qgraph)
+library(plyr)
+library(dplyr)
+library(psych)
+library(neurobase)
+library(oro.nifti)
+library(dplyr)
+library(png)
+library(ggiraphExtra)
+library(data.table)
+library(cowplot)
+library(ggplot2)
+library(patchwork)
+# library(NMF)
+library(ggbeeswarm)
+#source("/Volumes/Users/nfranzme/R_Projects/R_Imaging/workbench/workbench_map_volume_to_surface#.R")
+library(ggpubr)
+library(lubridate)
+library(reticulate)
+library(svMisc)
+library(NetworkToolbox)
+library(readxl)
+library(writexl)
+library(lme4)
+library(lmerTest)
+library(stringr)
+library(boot)
+library(table1)
+
+```
+
+# load input
+
+### define directories
+
+```{r}
+dir.root = "/Volumes/Users/nfranzme/R_Projects/Tutorials/GSN_course/fMRI_Day2_Graph_Theory/"
+dir.fc.200 = paste0(dir.root, "/Schaefer200_functional_connectivity/")
+dir.data.sheets = paste0(dir.root, "/data_sheets/")
+
+```
+
+# Data preparation
+
+**Step 1: load and prepare the data**
+
+The data frame contains data from the Alzheimer's disease neuroimaging
+initiative (ADNI) database.\
+ADNI is a large multi-center study that focuses on multi-modal
+neuroimaging in Alzheimer's disease patients, more information can be
+found here: <http://adni.loni.usc.edu>\
+\
+Included imaging modalities in the current dataset are tau-PET,
+amyloid-PET and resting-state fMRI. We will subset the data to healthy
+controls (i.e. cognitively normal [CN] individuals without evidence for
+amyloid pathology [Ab.neg]), and subjects across the Alzheimer's disease
+(AD) spectrum, defined as having abnormally elevated amyloid-beta (Ab)
+based on amyloid-PET. The AD spectrum includes individuals who are still
+cognitively normal (CN.Ab.pos, i.e. preclinical AD), subjects who show
+mild cognitive impairment (MCI.Ab.pos, i.e. prodromal AD), and patients
+with AD dementia (Dementia.Ab.pos)
+
+For this course we will work primarily with cross-sectional data, stored
+in the "ADNI.data.bl" data frame. However, some individuals also have
+longitudinal tau-PET, you could have a look at those data to if there is
+time left.
+
+### -\> read in data and select subjects with longitudinal data
+
+```{r}
+
+# read in ADNI data
+ADNI.data <- readxl::read_xlsx(paste0(dir.data.sheets, "/ADNI_fMRI_PET.xlsx"))
+ADNI.data <- subset(ADNI.data, ID !="sub-4431")
+# merge diagnosis and amyloid status
+ADNI.data$DX.Ab <- paste0(ADNI.data$DX, ".", ADNI.data$amyloid.global.SUVR.status)
+ADNI.data$DX.Ab <- factor(ADNI.data$DX.Ab, 
+                          levels = c("CN.Ab.neg", 
+                                     "CN.Ab.pos", 
+                                     "MCI.Ab.pos", 
+                                     "Dementia.Ab.pos"))
+
+# subset to controls and subjects across the AD spectrum (CN = cognitively normal, MCI = Mild Cognitive Impairment, Dementia = Alzheimer's disease dementia)
+ADNI.data <- subset(ADNI.data, DX.Ab %in% c("CN.Ab.neg", "CN.Ab.pos", "MCI.Ab.pos", "Dementia.Ab.pos"))
+
+# locate functional connectivity matrices
+ADNI.data$FC.mat.200 <- str_replace(ADNI.data$FC.mat.200, "/Network/Cluster/ADNI/functional_connectivity/Schaefer_200/", 
+                                    paste0(dir.root, "/Schaefer200_functional_connectivity/"))
+
+# select baseline data
+ADNI.data.bl = subset(ADNI.data, tau.pet.fu.yrs == 0)
+
+
+```
+
+### -\> create some overview tables
+
+First, you should get an idea of the type of data we're working with. So
+we will check some basic distributions of biomarker and cognitive data
+for the current patient cohort.
+
+#### create "table 1"
+
+We can first create an overview table of demographics, as well as
+amyloid-PET and tau-PET load, to\
+see how biomarkers are distributed across diagnostic groups.\
+We'll look at the following variables (Variable names on the left,
+explanation on the right)
+
+age = age\
+sex = sex\
+centiloid = global amyloid-PET level (a typical "cut-off" for
+abnormality is 20)\
+tau.global.SUVR = global tau-PET level (a typical "cut-off" for
+abnormality is 1.3)\
+MMSE = Mini Mental State Exam, i.e. a global cognitive screening
+instrument, where lower values indicate stronger cognitive impairment\
+ADNI_MEM = A memory composite score across several memory tests. Lower
+values indicate stronger impairment
+
+```{r}
+
+table1(~ age + factor(sex) + centiloid + tau.global.SUVR + MMSE + ADNI_MEM | DX.Ab, data = ADNI.data.bl)
+```
+
+As you can see, amyloid and tau levels increase (i.e. become more
+abnormal) across more severe\
+disease levels. Also, MMSE and ADNI_MEM values decrease, indicating
+stronger cognitive impairment.
+
+#### plot biomarker distributions
+
+Next, we should look at biomarker distributions of amyloid and tau
+pathology,\
+to get an idea of how amyloid and tau relate to increasing disease
+severity.\
+We'll use ggplot2 for plotting. Some useful ggplot2 tutorials can be
+found here:
+
+<https://ggplot2.tidyverse.org>\
+<http://r-statistics.co/Complete-Ggplot2-Tutorial-Part1-With-R-Code.html>\
+<http://r-statistics.co/ggplot2-Tutorial-With-R.html>
+
+##### 1. Amyloid-PET
+
+Let's first create a boxplot/beeswarm plot to illustrate the amyloid
+distribution across different diagnostic groups. The variables we'll
+look at are centiloid (i.e. amyloid-PET) and DX.Ab (i.e. diagnostic
+groups)
+
+```{r, fig.align='center'}
+
+# plot group differences
+ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = centiloid)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 20, linetype = 2)
+
+
+```
+
+As you can see, amyloid levels increase across the AD spectrum. The
+dashed line indicates where amyloid becomes abnormal.
+
+To statistically test these group differences, we can run an ANCOVA.
+It's quite common standard to control for some usual covariates in
+clinical research, such as age and sex (and often also education)
+
+So, lets quantify the group differences using an ANCOVA with a post-hoc
+Tukey Test. The ANCOVA tests whether there is an overall
+group-difference between diagnostic groups. The Post-Hoc Tukey test
+assesses the difference between single diagnostic groups.
+
+```{r warning=FALSE}
+# test group differences (ANCOVA), controlling for age and sex
+
+## run ANCOVA
+tmp.aov <- aov(data = ADNI.data.bl,
+               centiloid ~ DX.Ab + age + sex); 
+
+## summarize output
+summary(tmp.aov)
+
+## run post-hoc Tukey test to determine group differences
+TukeyHSD(tmp.aov, which = "DX.Ab")
+
+
+```
+
+##### 2. Tau-PET
+
+Let's do the same for tau-PET, so lets first create a boxplot/beeswarm
+plot to illustrate the tau distribution across diagnostic groups
+
+```{r, fig.align='center'}
+
+# plot group differences
+ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.global.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2)
+
+
+```
+
+As you can see, tau levels also increase across the AD spectrum.
+However, people usually start surpassing the threshold at symptomatic
+stages (MCI and Dementia). This is the case because amyloid precedes
+symptom onset by decades, while tau pathology is much closer to symptom
+onset. In fact, tau pathology is the key driver of neurodegeneration and
+cognitive decline, so you typically see abnormal tau first when people
+start to show symptoms.
+
+To statistically test these group differences, we can again run an
+ANCOVA with a post-hoc Tukey Test
+
+```{r warning=FALSE}
+# test group differences (ANCOVA), controlling for age and sex
+
+## run ANCOVA
+tmp.aov <- aov(data = ADNI.data.bl,
+               tau.global.SUVR ~ DX.Ab + age + sex); 
+
+## summarize output
+summary(tmp.aov)
+
+## run post-hoc Tukey test to determine group differences
+TukeyHSD(tmp.aov, which = "DX.Ab")
+
+
+```
+
+##### 3. Staging of tau pathology
+
+One thing to keep in mind is that the above described analyses on
+tau-PET are based on "global" tau levels. However, tau does not - in
+contrast to amyloid - accumulate globally throughout the brain, but
+rather follows a consecutive spreading pattern that typically starts in
+the inferior temporal lobe. This "spreading pattern" of tau pathology
+has been already described in the nineties by Braak & Braak.
+
+```{r echo=FALSE}
+knitr::include_graphics(paste0(dir.root, "/images/Braak_stage_Tau_positivity_sequence_Braak2_excl-01.jpg"))
+
+```
+
+The surface rendering shows the six Braak-stages. Abnormal tau pathology
+is typically found first in Stage 1 (Entorhinal cortex) and then spreads
+to the hippocampus (Stage 2), the inferior temporal and limbic cortex
+(Stages 3&4) and finally to the association and primary somatosensory
+cortex (Stages 5&6). The plot on the left illustrates the likelihood of
+tau abnormality within each Braak stage across a group of AD patients,
+showing that early Braak stages typically show earlier tau abnormality
+than later Braak stages. Note that we usually discard the hippocampus
+when looking at tau-PET, because the tau-PET tracer shows quite
+significant off-target binding in the choroid plexus which is right next
+to the hippocampus. Thus, tau-PET signal in the hippocampus is quite
+confounded, at least for first-generation tau-PET tracers like
+flortaucipir.
+
+Next, lets look at the distribution of tau pathology in the separate
+Braak stage ROIs. Tau-PET within these Braak-stage ROIs is labeled as
+tau.braak1.SUVR, tau.braak3.SUVR, tau.braak4.SUVR ,etc.
+
+```{r, fig.width=6, fig.height=16, fig.align='center'}
+
+# plot group differences
+p1 <- ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.braak1.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2) + 
+  ggtitle("Braak 1")
+
+p2 <- ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.braak3.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2) +
+  ggtitle("Braak 3")
+
+
+p3 <- ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.braak4.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2) +  
+  ggtitle("Braak 4")
+
+
+p4 <- ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.braak5.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2) + 
+  ggtitle("Braak 5")
+
+
+p5 <- ggplot(data = ADNI.data.bl,
+       aes( 
+         x = DX.Ab,
+         y = tau.braak6.SUVR)) + 
+  geom_boxplot(alpha = 0.1, notch = T, width = 0.5) + 
+  geom_beeswarm(alpha = 0.4) + 
+  theme_minimal() + 
+  geom_hline(yintercept = 1.3, linetype = 2) + 
+  ggtitle("Braak 6")
+
+
+p1 / p2 / p3 / p4 / p5
+
+```
+
+You can see that earlier Braak stage ROIs show abnormal signal more
+early during the disease course than later Braak stage ROIs
+
+##### 4. Association between amyloid and tau
+
+Our current understanding of Alzheimer's disease suggests that
+amyloid-beta deposition is the first pathological event to happen, that
+triggers downstream tau accumulation, neurodegeneration and cognitive
+decline. Thus, tau and amyloid should be correlated. Let's have a look:
+
+```{r, fig.align='center'}
+
+ggplot(ADNI.data.bl,
+       aes(
+         x = centiloid,
+         y = tau.global.SUVR
+       )) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "lm") + 
+  theme_minimal()
+
+
+
+```
+
+This shows that higher amyloid is clearly associated with higher tau
+pathology. We can quantify the association using correlation or linear
+regression controlling for age and sex
+
+```{r}
+
+# correlation
+rcorr(ADNI.data.bl$centiloid,
+      ADNI.data.bl$tau.global.SUVR)
+
+# linear regression controlling for age and sex
+tmp.lm <- lm(data = ADNI.data.bl,
+                     tau.global.SUVR ~ centiloid + age + sex); summary(tmp.lm)
+
+```
+
+## TASK 1
+
+***Now that you know how to run group comparisons (i.e. ANCOVAs) and
+correlations/regression (linear models), try to check whether amyloid
+and tau are associated with cognition (e.g. MMSE and ADNI_MEM). How do
+amyloid and tau relate to cognitive performance? Try to create figures
+and statistics showing differences in cognitive performance between
+diagnostic groups, and associations between amyloid, tau and
+cognition.***
+
+
+# fMRI analysis
+
+Next lets go have a look at some fMRI parameters. We have prepared
+functional connectivity data using a common 200 ROI cortical atlas (see
+<https://pubmed.ncbi.nlm.nih.gov/28981612/>). A surface rendering of the
+atlas can be found below, including the seven networks (DMN =
+Default-Mode, DAN = Dorsal Attention, VAN = Ventral Attention, FPCN =
+Fronto-parietal control, Visual, Motor, Limbic)
+
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/Schaefer200.png"))
+
+```
+
+## 1. Importing connectivity matrices
+
+Atlas based connectivity is usually stored in matrix format also
+referred to as adjacency matrix. For 200 ROIs this means that the
+resulting adjacency matrix 200x200 elements large, where each element
+corresponds to the connectivity-metric between two ROIs (e.g. Fisher-z
+transformed Pearson correlation). All connectivity matrices are stored
+in the *"Schaefer200_functional_connectivity"* folder on the hard drive
+in *.csv* format. This folder is already stored in your R worksapce as
+*"dir.fc.200"*. The paths to the matrices are stored in the
+*"ADNI.data.bl"* data frame in the variable *"FC.mat.200"* Lets load an
+example to see how this looks like.
+
+```{r}
+# import and format connectivity matrix using the read.csv command
+current.adj.matrix = read.csv(ADNI.data.bl$FC.mat.200[1])
+  
+
+```
+
+When checking the dimension of this matrix, we realize that there are
+201 columns and 200 rows. The first column contains the rownames, so we
+need to remove it in order to get a symmetrical 200x200 matrix
+
+```{r}
+# check dimensions
+dim(current.adj.matrix)
+
+# remove first column
+current.adj.matrix.cleaned <- current.adj.matrix[,-1]
+
+# transform to matrix format
+current.adj.matrix.cleaned.matrix <- as.matrix(current.adj.matrix.cleaned)
+
+# check dimensions
+dim(current.adj.matrix.cleaned)
+
+
+```
+
+Now the connectivity matrix has 200 rows and 200 columns. Lets have a
+look at the overall connectivity pattern. You can plot connectivity
+matrices using the *"corrplot"* package.
+
+```{r, fig.align='center'}
+# plot correlation matrix
+corrplot::corrplot(current.adj.matrix.cleaned.matrix, 
+                   diag = FALSE, 
+                   tl.pos = "n", 
+                   tl.cex = 0.5, 
+                   method = "color", 
+                   is.corr = FALSE)
+
+```
+
+You can see that the connectivity matrix is symmetrical, with positive
+correlations and negative correlations. Positive correlations (blue
+colors) mean that two brain regions show correlated BOLD signal,
+suggesting that they're functionally connected. Negative correlations
+indicate anti-correlations, where one region is up-regulated and another
+one is down-regulated at the same time.
+
+## 2. Preparing connectivity matrices for graph theoretical analyses
+
+In order to perform graph theoretical analyses, we usually perform some
+additional preprocessing steps, e.g. we remove negative connections or
+perform thresholding of the matrix.
+
+
+I've written a function that can perform some basic thresholding
+operations for you. The function below can be called from the command
+line, and need several input arguments adj_matrix = a symmetrical
+adjacency matrix retain_negatives = a boolean statement (TRUE/FALSE)
+indicating whether or not negative values should be retained density = a
+percentage of connections that should be retained. 1 indicates that 100%
+of connections should be retained, 0.3 means that only 30% of the
+strongest connections will be retained replace_with_NAs = a boolean
+statement (TRUE/FALSE) indicating whether values that are eliminated
+from the matrix should be replaced with an NA (not assigned). Otherwise,
+values are replaced with a zero.
+
+```{r}
+# define matrix thresholding function
+
+adj_mat_density_thresh=function(adj_matrix, retain_negatives, density, replace_with_NAs){
+  # exclude negative values
+  if (retain_negatives==F){adj_matrix[adj_matrix<0]=0}
+  # determine threshold
+  threshold=quantile(abs(adj_matrix), 1-density)
+  # apply threshold
+  if (replace_with_NAs==F){adj_matrix[abs(adj_matrix)<threshold]=0}
+  if (replace_with_NAs==T){adj_matrix[abs(adj_matrix)<threshold]=NA}
+  
+  return(adj_matrix)
+  
+}
+
+```
+
+Next, lets threshold the matrix that we've imported previously and
+eliminate the negative values (i.e. retain_negatives = F), while keeping
+all positive values (i.e. density = 1). Everything else should be
+replaced with a zero.
+
+#### Removing negative connections
+
+
+```{r}
+# call the function and store the output in a new variable
+current.adj.matrix.cleaned.matrix.thr1 <- adj_mat_density_thresh(adj_matrix = current.adj.matrix.cleaned.matrix, 
+                                                                retain_negatives = F, 
+                                                                density = 1, 
+                                                                replace_with_NAs = F)
+
+```
+
+Let's see how the new matrix looks like:
+
+```{r}
+# plot correlation matrix
+corrplot::corrplot(current.adj.matrix.cleaned.matrix.thr1, 
+                   diag = FALSE, 
+                   tl.pos = "n", 
+                   tl.cex = 0.5, 
+                   method = "color", 
+                   is.corr = FALSE)
+```
+
+You can see that all the negative values have been eliminated, while the
+positive values have been kept. 
+
+#### Density thresholding
+
+Next, lets see what thresholding does to
+the matrix. Now, we want to retain only 10% of the strongest positive
+connections (i.e. a density of 0.1)
+
+```{r}
+# call the function and store the output in a new variable
+current.adj.matrix.cleaned.matrix.thr0p1 <- adj_mat_density_thresh(adj_matrix = current.adj.matrix.cleaned.matrix, 
+                                                                retain_negatives = F, 
+                                                                density = 0.1, 
+                                                                replace_with_NAs = F)
+
+```
+
+Let's see how the thresholded matrix looks like:
+
+```{r}
+# plot correlation matrix
+corrplot::corrplot(current.adj.matrix.cleaned.matrix.thr0p1, 
+                   diag = FALSE, 
+                   tl.pos = "n", 
+                   tl.cex = 0.5, 
+                   method = "color", 
+                   is.corr = FALSE)
+```
+
+You can see that the matrix looks quite sparse now and only the
+"backbone" of very strong connections is retained. Sometimes
+thresholding is done to eliminate "noisy" and "weak" connections.
+However, these weak connections have actually been shown to encode some
+important inter-individual information, as shown by papers on
+"connectome fingerprinting" (see work by Emily Finn
+<https://www.nature.com/articles/nn.4135>)
+
+#### Binarization 
+
+While the matrix above is relatively sparse, it still includes information
+about the "strength" of a connection, which we refer to as a *weighted
+matrix* 
+Some researchers, however, use *binary* matrices, which just
+encode the presence or absence of a connection. This is often done for structural connectivity
+matrices. Binarization can be done quite easily using the *NetworkToolbox*.
+Lets binarize the matrix in which we've retained only 10% of the strongest connections
+
+```{r, fig.align='center'}
+current.adj.matrix.cleaned.matrix.thr0p1.bin <- NetworkToolbox::binarize(current.adj.matrix.cleaned.matrix.thr0p1)
+
+# plot correlation matrix
+corrplot::corrplot(current.adj.matrix.cleaned.matrix.thr0p1.bin, 
+                   diag = FALSE, 
+                   tl.pos = "n", 
+                   tl.cex = 0.5, 
+                   method = "color", 
+                   is.corr = FALSE)
+```
+
+Now, all information about the strength of connections is lost.
+
+
+## 3. Computing graph theoretical parameters
+
+Next, lets use the connectivity matrix to compute some basic graph
+theoretical parameters.\
+For this, the *"NetworkToolbox"* is quite helpful, which comes with some
+easy to use commands (see
+<https://cran.r-project.org/web/packages/NetworkToolbox/NetworkToolbox.pdf>)
+
+### 3.1 Clustering 
+The clustering coefficient quantifies the abundance of connected triangles in a network and is a major descriptive statistics of networks.
+This means, if a node is connected to two neighbours, and if these neighbours are also interconnected, they form a cluster (triangle), as illustrated in the example below.
+
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/Clustering.png"))
+
+```
+So lets compute the clustering coefficient on our matrix. We can compute a "Global" clustering coefficient for the entire network,
+as well as a clustering coefficient for each single node in the network. To compute the clustering coefficient, we use the *clustcoeff* command from the NetworkToolbox. This command requires two inputs, an adjacency matrix and a TRUE/FALSE statement on whether the matrix is weighted or binary.
+Clustering is usually computed on networks with "positive" connections only, hence we need to use the matrix from which we have eliminated the negative connections called *current.adj.matrix.cleaned.matrix.thr1*
+You can find information about this function by typing *help("clustcoeff")* in the console.
+We can compute the clustering coefficient for networks thresholded at a density of 1 and 0.1 to see how the clustering coefficient changes.
+
+
+```{r}
+# compute clustering 
+tmp.clustering.weighted.thr1 <- clustcoeff(current.adj.matrix.cleaned.matrix.thr1, weighted = T)
+tmp.clustering.weighted.thr0p1 <- clustcoeff(current.adj.matrix.cleaned.matrix.thr0p1, weighted = T)
+
+```
+
+The output contains two different measures, the global clustering coefficient *CC*, and the local clustering coefficient for
+each ROI called *CCi*. You can choose which one to look at by navigating with the *$* sign.
+
+```{r}
+# global clustering
+tmp.clustering.weighted.thr1$CC
+tmp.clustering.weighted.thr0p1$CC
+
+
+# ROI-wise clustering
+tmp.clustering.weighted.thr1$CCi
+tmp.clustering.weighted.thr0p1$CCi
+
+# correlation of clustering coefficients across different thresholds
+plot(tmp.clustering.weighted.thr1$CCi, tmp.clustering.weighted.thr0p1$CCi)
+rcorr(tmp.clustering.weighted.thr1$CCi, tmp.clustering.weighted.thr0p1$CCi)
+
+```
+
+You can see that clustering is much higher in the network that was thresholded more restrictively.
+Any idea/hypothesis why this could be the case?
+
+
+### 3.2 Degree 
+The degree of a node quantifies the number or strength of connections that a given node has to the rest of the network (see figure below)
+
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/Degree.png"))
+
+```
+
+The degree can also be computed relatively simple as the row or column Means of a adjacency matrix, 
+which just quantifies the strength of connections that a given node has to the remaining 199 nodes.
+to this end, we also need to eliminate the diagnonal of the adjacency matrix.
+
+```{r}
+
+# ROI-wise degree
+# store matrix in temporary matrix
+tmp.matrix.thr1 = current.adj.matrix.cleaned.matrix.thr1
+tmp.matrix.thr0p1 = current.adj.matrix.cleaned.matrix.thr0p1
+
+# replace the diagnonal (autocorrelations) with  NAs
+diag(tmp.matrix.thr1) = 0
+diag(tmp.matrix.thr0p1) = 0
+
+# compute degree
+tmp.degree.weighted.thr1 <- colMeans(tmp.matrix.thr1, na.rm = T)
+tmp.degree.weighted.thr0p1 <- colMeans(tmp.matrix.thr0p1, na.rm = T)
+
+# correlation of clustering coefficients across different thresholds
+plot(tmp.degree.weighted.thr1,tmp.degree.weighted.thr0p1)
+rcorr(tmp.degree.weighted.thr1,tmp.degree.weighted.thr0p1)
+```
+
+
+### 3.3 Community strength 
+We can also compute the degree of a node to ROIs of his own network, vs. to ROIs outside of the network.
+An example of this would be, how strong the posterior-cingulate cortex (i.e. a typical hub of the Default-Mode Network) is connected to
+the remaining DMN nodes, vs. everything outside of the DMN.
+
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/Community.jpg"))
+
+```
+To compute the connectivity of a given node to members of his own network vs. members of other networks, we need to know first,
+to which network a given node belongs to.
+To this end, we can use the community vector.
+
+```{r}
+# load community vector
+Community <- read.table(paste0(dir.root, "Atlas/Schaefer2018_200Parcels_7Networks_order_numeric.txt"))
+Community$names <- mapvalues(Community$V1, 
+                             from=c(1,2,3,4,5,6,7), 
+                             to=c("Visual", "Motor", "DAN", "VAN", "Limbic", "FPCN", "DMN"))
+
+# check the number of ROIs assigned to each node
+table(Community$names)
+```
+
+Next, lets compute the community strength. We need three input arguments,
+A = the connectivity matrix
+comm = the community vector (i.e. which network does a node belong to)
+weighted = a boolean (TRUE/FALSE), stating whether the network is weighted or not
+
+
+```{r}
+# first, we need to replace the diagonal with a zero
+tmp.matrix = current.adj.matrix.cleaned.matrix.thr1
+diag(tmp.matrix) = 0
+
+tmp.comm.str.within = comm.str(A = tmp.matrix,
+         comm = Community$names,
+         weighted = T,
+         measure = c("within"))
+tmp.comm.str.within
+
+tmp.comm.str.between = comm.str(A = tmp.matrix,
+         comm = Community$names,
+         weighted = T,
+         measure = c("between"))
+tmp.comm.str.between
+
+```
+

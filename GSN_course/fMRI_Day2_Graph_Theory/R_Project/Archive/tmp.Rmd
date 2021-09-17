@@ -1,0 +1,197 @@
+```{r}
+library(readxl)
+library(corrplot)
+library(lm.beta)
+library(Hmisc)
+library(qgraph)
+library(plyr)
+library(dplyr)
+library(psych)
+library(neurobase)
+library(oro.nifti)
+library(dplyr)
+library(png)
+library(ggiraphExtra)
+library(data.table)
+library(cowplot)
+library(ggplot2)
+library(patchwork)
+# library(NMF)
+library(ggbeeswarm)
+#source("/Volumes/Users/nfranzme/R_Projects/R_Imaging/workbench/workbench_map_volume_to_surface#.R")
+library(ggpubr)
+library(lubridate)
+library(reticulate)
+library(svMisc)
+library(NetworkToolbox)
+library(readxl)
+library(writexl)
+library(lme4)
+library(lmerTest)
+library(stringr)
+library(boot)
+library(table1)
+```
+
+
+```{r}
+
+dir.root = "/Volumes/NO NAME/fMRI_Day2_Graph_Theory/"
+ADNI.data.bl.graphtheory <- readxl::read_xlsx(
+  paste0(dir.root, "/data_sheets/ADNI_fMRI_PET_GraphTheory.xlsx"))
+
+ADNI.data.bl.graphtheory$DX.Ab <- factor(ADNI.data.bl.graphtheory$DX.Ab, 
+                          levels = c("CN.Ab.neg", 
+                                     "CN.Ab.pos", 
+                                     "MCI.Ab.pos", 
+                                     "Dementia.Ab.pos"))
+
+```
+
+### What happens to the default mode network (DMN) in Alzheimer's disease patients?
+
+Previous studies have suggested that the DMN is disrupted in Alzheimer's disease patients.
+Attached, find a figure from a cohort with autosomal dominantly inherited AD patients (i.e. a rare genetic form of the disease,
+which becomes symptomatic around the age of 40). Here, you can clearly see that the DMN becomes less pronounced in patients with autosomal dominantly inherited AD (right) vs. controls (left). 
+By the way, if you want to learn more about the DMN, I recommend this excellent review by Randy Buckner:
+https://www.nature.com/articles/s41583-019-0212-7
+
+
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/DMN.jpg"))
+
+```
+Similar observations of DMN disruption have been made in patients with sporadic AD. The DMN has
+been suggested to be crucial for episodic memory performance, hence DMN disruptions have been argued to 
+drive memory decline. 
+```{r echo=FALSE, fig.align='center'}
+knitr::include_graphics(paste0(dir.root, "/images/DMN2.png"))
+
+```
+#### Does DMN connectivity change across the spectrum of AD
+
+First, lets plot a simple measure of within DMN connectivity across controls and AD patients.
+We have computed this measure in our for-loop and saved it as *network.connectivity.within.DMN* in the 
+*ADNI.data.bl.graphtheory* data frame. We use ggplot again to create a figure
+
+```{r, fig.align='center'}
+
+ggplot(data = ADNI.data.bl.graphtheory,
+       aes( 
+         x = DX.Ab,
+         y = network.connectivity.within.DMN)) +
+  geom_boxplot(notch = T, alpha = 0.1) + 
+  geom_beeswarm() + 
+  theme_minimal()
+
+```
+
+As you can see, there is a decrease in DMN connectivity across the AD spectrum.
+But is this decrease significant? Lets use an ANCOVA to test this.
+
+```{r}
+tmp.aov <- aov(data = ADNI.data.bl.graphtheory,
+               network.connectivity.within.DMN ~ DX.Ab + age + sex); summary(tmp.aov)
+
+```
+Indeed, the data shows that the connectivity within the DMN decreases across the
+AD spectrum. 
+
+```{r}
+TukeyHSD(tmp.aov, which = "DX.Ab")
+
+```
+
+A post-hoc Tukey test shows that the patients with AD dementia mostly drive this effect
+
+
+Next, lets have a look whether the connectivity of the DMN to the remainig brain also changes
+across the AD spectrum. We have also computed this measure in our 
+for-loop and saved it as *network.connectivity.between.DMN* in the 
+*ADNI.data.bl.graphtheory* data frame. So same procedure as above....
+
+```{r, fig.align='center'}
+
+ggplot(data = ADNI.data.bl.graphtheory,
+       aes( 
+         x = DX.Ab,
+         y = network.connectivity.between.DMN)) +
+  geom_boxplot(notch = T, alpha = 0.1) + 
+  geom_beeswarm() + 
+  theme_minimal()
+
+```
+
+As you can see, there is a rather an increase in DMN connectivity to the remaining brain across the AD spectrum.
+This suggests some sort of de-differentiation of network activity (i.e. reduced within but increased between network connectivity)
+But is this decrease significant? 
+
+```{r}
+tmp.aov <- aov(data = ADNI.data.bl.graphtheory,
+               network.connectivity.between.DMN ~ DX.Ab + age + sex + PTEDUCAT); summary(tmp.aov)
+
+```
+Nope....So to sum up: What we find is a decrease in DMN connectivity across the AD spectrum.
+But is this decrease in connectivity really related to memory?
+Lets have a look at a scatterplot first
+
+```{r, fig.align='center'}
+ggplot(data = ADNI.data.bl.graphtheory,
+       aes( 
+         x = network.connectivity.within.DMN,
+         y = ADNI_MEM)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  theme_minimal()
+```
+
+Next, lets check the correlation between DMN connectivity and memory performance
+```{r}
+# compute correlation
+rcorr(ADNI.data.bl.graphtheory$network.connectivity.within.DMN,
+      ADNI.data.bl.graphtheory$ADNI_MEM)
+
+```
+Looks like there is a slight correlation between decreasing within DMN connectivity and 
+decreasing memory performance. But keep in mind that "healthy controls" (i.e. CN.Ab.neg) 
+are also included in this plot and the correlation analysis.
+So in order to specifically investigate the role of the DMN in AD patients, we need to create a subset of the data,
+that is restricted to AD patients. To this end, 
+we subset the data fram *ADNI.data.bl.graphtheory* to 
+subjects whose diagnosis is unequal to (i.e. *!=*) *"CN.Ab.neg"*.
+
+```{r}
+# we store our subset in a dedicated data frame
+ADNI.data.bl.graphtheory.AD.only <- subset(ADNI.data.bl.graphtheory, DX.Ab!="CN.Ab.neg")
+
+```
+
+Now we're left with AD patients only as you can see from the table below.
+
+```{r}
+table(ADNI.data.bl.graphtheory.AD.only$DX.Ab)
+```
+
+So lets have a look again at the association between network connectivity and memory performance,
+using our subset of AD patients only:
+
+```{r, fig.align='center'}
+ggplot(data = ADNI.data.bl.graphtheory.AD.only,
+       aes( 
+         x = network.connectivity.within.DMN,
+         y = ADNI_MEM)) +
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  theme_minimal()
+
+# compute correlation
+rcorr(ADNI.data.bl.graphtheory.AD.only$network.connectivity.within.DMN,
+      ADNI.data.bl.graphtheory.AD.only$ADNI_MEM)
+
+```
+Looks a bit stronger!
+So together, we found that DMN connectivity decreases across the AD spectrum, 
+and that a decrease in DMN connectivity is associated with lower memory performance.
+
+
+
